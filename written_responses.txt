@@ -1,20 +1,78 @@
 ### Part A - recover the data (CAN decode)
 
-Frame ID kept:
+Frame ID kept: 0x200 
 
-Signal 1 (u_commanded):  byte position / endianness / signed? / scale / offset:
-Signal 2 (y_measured):   byte position / endianness / signed? / scale / offset:
+Signal 1 (u_commanded):  byte position 16/ endianness @1/ signed -/ scale 0.1 / offset: 0
+Signal 2 (y_measured):   byte position 16/ endianness @1/ signed -/ scale 0.1 / offset: 0
 
 Notes (anything odd in the logs, how you checked the decode against the PNGs):
 
 
 
 ### Part B - identify system
+Plant's gain and time constant:
+- To find the gain of the system, using the data logs at t = 1 and t = 2: (1,15,15.7 and 2,15,35.2)
+- Gain (K) is physical velocity/command input = 19.5/15 = 1.3 
 
+- The time constant of the plant: When the step change occurs at t = 3.0 seconds, y_0 is 54.7deg. At t = 3.245,
+  y stabilizes at 56.1 deg. Therefore the overrun distance is 1.4 deg. The slope of the line (velocity) is given by:
+  using the logs at t = 1 and t = 2 (1,15,15.7 and 2,15,35.2), the slope is change in y_measured divided by the change in time. 
+  Hence, 19.5 deg/s. Therefore the time constant is 1.4 deg/19.5 deg/s, which is roughly 0.072 seconds. 
 
+deadband_test, u_commanded vs y_measured over time
+- from 0-2 seconds the output does rise and respond to the commanded 2deg/s, as y_measured gradually
+  rises from 0 to 2.6 deg. 
+nonlinearity analysis:
+- from 2 seconds onwards, the commanded angle flips from 2 to -2 deg/s and the plants angle plot remains
+  constant at 2.6 deg (totally unresponsive to the change in direction which happened 6 times, held for 2 seconds each).
+- this is indicative of deadzone as the plant responds to the initial command, but is unresponsive 
+  (shown by the flat curve) when the command angle alternates between values of the same magnitude
+  but with different directions.
+- supported in reversal_test: with +- 8deg/s commands and 6 instances of reversing, the output seems completely
+  sensitive to a change in commanded rate, as shown by the curves appropriately gradually rising and falling (which
+  is consistent over all 6 reversals). 
+Hence, as the plant is completely insensitive to smaller, repeated bidirectional commands, but completely responsive
+to commands with larger magnitudes (as shown in reversal_test), we can conclude that there is a deadzone around the
+zero commanded angular rate. 
+
+Estimating non-linearity's size: 3.0 deg/s
+- We know the deadzone is bounded within 2 deg/s and 8 deg/s (from observing deadband_test and reversal_test logs).
+- This is probably due to a minimum input to surpass static friction and allow the can bus to actually move
+- Since the CAN bus seems to be able to pretty rapidly surpass static friction when the command angle is 8 deg/s
+    (as shown in the reversal_test) it's safe to assume the deadzone threshold is much less than 8 deg/s.
+    Just purely estimating though, it seems that being just above 2.0 deg/s is enough. So for this part, the 
+    non-linearity's size is 3.0 deg/s.
 
 ### Part C - control design choices
+I wanted to use Ziegler Nichols reaction curve tuning method to direct precise motor speed. The tuning process includes
+adjusting K_p, K_i, and K_d (proportional, integral, derivative gain) values until the CAN bus reaches the desired command angle. 
+This takes the data from step test, calculates the slope (the reaction rate, same value as K in part B), 
+the lag time and accounts for the deadzone (then scale the result). Use these results to find K_p, K_i, and K_d.
 
+From part B the slope divided by the command (reaction rate) was K = 1.3, and the time lag was estimated to be 0.082. Every timestep (0.005s), 
+the controller recieves the target and the last y_measured and returns a command angle (in deg/s). Pass into plant.step(), which returns
+the new measured angle. Then this result is fed back into the controller for the next timestep. Overall, the conroller only actually looks at the
+target angle, the measured angle, and the change in time. This mimics a real system because only the CAN-reported angle is visible. 
 
+Keep limits on the integral gain and integral zone as per the spec: capping at 1.5 (to prevent large overshoot, the controller only needs to overcome the deadzone
+of 3 deg/s) and also the test values in the check_solution file. 
+
+Detect the new target, check if the error is within the integral zone, find speed of the last tick, saves the current passed-in angle for
+the next loop, then apply the PID formula to push the angle of the plant. This is done so that for each timestep, the controller can 
+look at past errors over time and integrate, find the velocity and then finally the returned value the measured angle (adjusted with the gain constants).
 
 ### Part D - reflection
+Part B:
+The max error is 2.600 deg when I assumed the non-linearity's size is 3.0 deg/s (written as deadzone in the plant code). I'm not too sure 
+about how I could've found the deadzone non-linearity without guesstimating, since there's only the obvious fact that it's between 8.0 deg/s 
+and 2 deg/s. A more factually supported estimation would've done my results much better.
+
+Also the way I dealt with the static friction threshold is probably innacurate to the way it works in real life (I set the velocity gained by
+the CAN bus to be equal to zero whenever the command velocity was < 3, like an on and off switch). So overall I don't think my 
+part B correctly mimics the delay experienced by the can bus. 
+
+But also the non-linearity could've been backlash instead of deadzone, which means the code can't ignore smaller command angles like how it does
+when I assumed deadzone. So a different code dealing with u_effective is necessary. 
+
+Part C:
+Since my plant.hpp doesn't work I can't really tell how effective controller.hpp is since check 2 requires both to work
